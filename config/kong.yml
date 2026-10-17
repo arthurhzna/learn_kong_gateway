@@ -1,0 +1,10 @@
+_format_version: "2.1"
+
+services:
+
+- name: echo-server
+  url: http://172.29.241.32:6969
+  routes:
+  - name: echo
+    paths:
+    - /echo
