@@ -39,7 +39,7 @@ Backend receives = Service Path  +  ( client URL  −  Route Path , if Strip is 
    ┌──────────────────────────────────────────────┐
    │ ① MATCH (Route Path)                          │
    │    "starts with /micro/hb-service?"  ✅        │
-   │    → use Service hb-service (mumbai)          │
+   │    → use Service hb-service (rudeus)          │
    └──────────────────────┬───────────────────────┘
                           ▼
    ┌──────────────────────────────────────────────┐
@@ -104,7 +104,7 @@ In effect, Kong **swaps** `/hb` for `/micro/hb-service`.
 ## 6. Examples
 
 **Backend (Go code):** `/micro/hb-service/heartbeat/v2/insert_data`
-**Service Host:Port:** `mumbai-svc:80`
+**Service Host:Port:** `rudeus-svc:80`
 **`KONG`** = `https://kong-gateway-uat.example.com`
 
 ### ✅ Correct
@@ -132,12 +132,12 @@ In effect, Kong **swaps** `/hb` for `/micro/hb-service`.
 
 ### A backend whose code has NO prefix
 
-Code: `router.Handle("/users/list")`, Route Path `/micro/nairobi`, Service Path empty
+Code: `router.Handle("/users/list")`, Route Path `/micro/roxy`, Service Path empty
 
 | Strip | Client calls | Backend receives | Result |
 |---|---|---|---|
-| **YES** | `KONG/micro/nairobi/users/list` | `/users/list` | ✅ |
-| **NO** | `KONG/micro/nairobi/users/list` | `/micro/nairobi/users/list` | ❌ |
+| **YES** | `KONG/micro/roxy/users/list` | `/users/list` | ✅ |
+| **NO** | `KONG/micro/roxy/users/list` | `/micro/roxy/users/list` | ❌ |
 
 ### Empty Route Path (catch-all, e.g. `pvj-ucok`)
 
@@ -189,11 +189,11 @@ Text version:
 4. Kong picks the Route with the **longest matching prefix** (the most specific one).
 
 ```
-Request: /micro/nairobi/users
+Request: /micro/roxy/users
   Route /micro          ✅ matches
-  Route /micro/nairobi  ✅ matches, longer → CHOSEN
+  Route /micro/roxy  ✅ matches, longer → CHOSEN
 
-Request: /micro/berlin/x   (berlin has no Route yet)
+Request: /micro/eris/x   (eris has no Route yet)
   Route /micro          ✅ matches → goes to the /micro backend by mistake  ⚠️
   (without a /micro Route → Kong returns 404 "no Route matched", which is clearer)
 ```
@@ -211,9 +211,9 @@ OpenShift Route  (kong-data-plane)      ← entry into the cluster (≈ "ports:"
 Kong Data Plane
   │  ① match Route Path  ② cut (Strip)  ③ join (Service Path)
   ▼
-K8s Service  mumbai-svc:80                   ← stable address (DNS .svc.cluster.local)
+K8s Service  rudeus-svc:80                   ← stable address (DNS .svc.cluster.local)
   ▼
-Endpoints → Pod mumbai  :9036                    ← backend container
+Endpoints → Pod rudeus  :9036                    ← backend container
   ▼
 router.Handle("/micro/hb-service/heartbeat/v2/insert_data")  ✅
 ```
@@ -230,7 +230,7 @@ https://heartbeat-uat.example.com/micro/hb-service/heartbeat/v2/insert_data
 
 - [ ] Check the path in the backend code (`router.Handle(...)`)
 - [ ] Decide the URL the client will call
-- [ ] Service → Host = K8s Service name (e.g. `mumbai-svc`), Port = `80`
+- [ ] Service → Host = K8s Service name (e.g. `rudeus-svc`), Port = `80`
 - [ ] Service → Path = the **missing** part (empty if nothing is missing)
 - [ ] Route → Paths = a **specific** prefix, no trailing `/`
 - [ ] Route → Strip = **YES** if the client prefix isn't in the code, **NO** if it is
