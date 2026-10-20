@@ -235,3 +235,202 @@ https://heartbeat-uat.example.com/micro/hb-service/heartbeat/v2/insert_data
 - [ ] Route → Paths = a **specific** prefix, no trailing `/`
 - [ ] Route → Strip = **YES** if the client prefix isn't in the code, **NO** if it is
 - [ ] Check: `Service Path + (client − Route Path if YES)` = path in the code? ✅
+
+
+# Kong: Route Hosts
+
+> What the **Hosts** field on a Kong Route does (Konga / Kong Manager / `kong.yml`).
+> Domain and service names below are **placeholders**.
+
+| Placeholder | Meaning |
+|---|---|
+| `kong-proxy.apps.example.com` | Kong proxy domain (OpenShift Route to the Kong data plane) |
+| `heartbeat.apps.example.com` | OpenShift Route that goes straight to the backend (no Kong) |
+| `heartbeat-svc` | Kubernetes Service of the backend |
+| `/micro/hb-gateway` | Path prefix in the backend code |
+
+---
+
+## 1. A URL has two parts
+
+```
+https://kong-proxy.apps.example.com/micro/hb-gateway/heartbeat/v2/insert
+        └─────────── HOST ─────────┘└──────────────── PATH ──────────────┘
+          checked by Route Hosts         checked by Route Paths
+```
+
+A Kong Route can check **both**:
+
+| Route field | Checks | Changes the request? |
+|---|---|---|
+| **Hosts** | Domain the client called (`Host` header) | ❌ No, match only |
+| **Paths** | Path the client called | Only if Strip Path is YES (cut) |
+| **Methods** | GET / POST / … | ❌ No |
+
+---
+
+## 2. Analogy: a guard at the door
+
+Kong is a **building**, and every Route is a **room** with a guard at the door.
+
+```
+                ┌──────────────── Route heartbeat_v2 ────────────────┐
+Request ──►  🧍 Guard:                                               │
+             1. "Which address (Host) did you come through?"         │
+                → must be kong-proxy...  OR  heartbeat...            │
+             2. "Where are you going (Path)?"                        │
+                → must start with /micro/hb-gateway                  │
+                                                                     │
+             Both correct ──► enter ──► heartbeat-svc                │
+                └─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Matching rules: OR inside, AND between
+
+- **Inside one field: OR**. Any one listed value is enough.
+- **Between fields: AND**. Every filled field must match.
+
+```
+Hosts  : kong-proxy.apps.example.com   OR   heartbeat.apps.example.com
+   AND
+Paths  : starts with /micro/hb-gateway
+   AND
+Methods: (if set)
+```
+
+| Request | Host | Path | Result |
+|---|---|---|---|
+| `https://kong-proxy.apps.example.com/micro/hb-gateway/heartbeat/v2/insert` | ✅ | ✅ | ✅ matches this Route |
+| `https://kong-proxy.apps.example.com/user/profile` | ✅ | ❌ | ❌ try other Routes |
+| `https://kong-proxy-uat.apps.example.com/micro/hb-gateway/...` | ❌ | ✅ | ❌ 404 `no Route matched` |
+
+---
+
+## 4. Hosts filled vs empty
+
+| Request domain | Hosts **filled** | Hosts **empty** |
+|---|---|---|
+| In the list | ✅ accepted | ✅ accepted |
+| **Not** in the list | ❌ rejected (404) | ✅ accepted |
+
+```
+Hosts empty   = "any domain is fine, only the Path is checked"
+Hosts filled  = "only domains in the list are accepted"
+```
+
+The difference **only** shows for domains that are **not** in the list.
+
+---
+
+## 5. Why does one Route have two Hosts?
+
+Two hosts = **two doors** into the same room.
+
+```
+https://kong-proxy.apps.example.com/micro/hb-gateway/...  ─┐
+                                                            ├─► Route heartbeat_v2 ─► heartbeat-svc
+https://heartbeat.apps.example.com/micro/hb-gateway/...   ─┘
+```
+
+**But** Hosts only matter for requests that **have already reached Kong**.
+
+```
+Layer 1: OpenShift Route   (decides whether the request reaches Kong at all)
+Layer 2: Kong Route Hosts  (only works once the request is inside Kong)
+```
+
+| Domain | OpenShift Route points to | Host on the Kong Route used? |
+|---|---|---|
+| `kong-proxy.apps.example.com` | Kong data plane Service | ✅ Yes |
+| `heartbeat.apps.example.com` | **Directly** to `heartbeat-svc` | ❌ No, Kong never sees this traffic |
+
+The second domain is usually listed as:
+
+1. **Migration prep.** Later the OpenShift Route `heartbeat` is switched to Kong, and apps using the old URL keep working without changing it.
+2. **Leftover config.**
+
+Check whether a domain goes through Kong (Kong adds `Via` / `X-Kong-*` headers). This is read-only:
+
+```bash
+curl -sk -o /dev/null -D - https://heartbeat.apps.example.com/ | grep -iE "via|x-kong"
+```
+
+---
+
+## 6. Don't mix them up: Route Hosts vs Service Host
+
+```
+Client ──(Route Hosts)──► KONG ──(Service Host)──► Backend
+         INCOMING domain           OUTGOING target
+```
+
+| | Route → **Hosts** | Service → **Host** |
+|---|---|---|
+| Direction | Client → Kong (**incoming**) | Kong → backend (**outgoing**) |
+| Value | Domain the client called | Kubernetes Service name of the backend |
+| Example | `kong-proxy.apps.example.com` | `heartbeat-svc` |
+| How many | A list | One |
+| Purpose | Matching | Destination |
+
+---
+
+## 7. Hosts and Route priority
+
+A Route with **more conditions** (Hosts + Paths + Methods) is **more specific**, so Kong prefers it.
+
+| Route | Conditions | Priority |
+|---|---|---|
+| `heartbeat_v2` | Hosts + Paths | High |
+| Route with Paths only | Paths | Medium |
+| Catch-all (Methods only) | Methods | Low (fallback) |
+
+That's why heartbeat requests don't fall into a catch-all Route.
+
+---
+
+## 8. Things to remember
+
+1. **Copying config between environments (dev → uat):** change Hosts to the target environment's domains. If UAT Kong still lists dev domains, every UAT request returns **404 `no Route matched`**.
+2. **Emptying Hosts:** the Route accepts every domain. Fine when there's one Route per Path, but it can **clash** with another Route that uses the same Path and is told apart only by Hosts.
+3. **Wildcards:** Kong supports `*.example.com` (leading or trailing wildcard) to match many subdomains at once.
+4. **`preserve_host`** (another Route field): default `false`, so Kong sends `Host: heartbeat-svc` (the Service Host) to the backend. When `true`, Kong forwards the client's original domain.
+
+---
+
+## 9. Try it on a local Kong
+
+`kong.yml`:
+
+```yaml
+_format_version: "3.0"
+services:
+- name: echo
+  url: http://httpbin.org/anything
+  routes:
+  - name: echo
+    paths: [/echo]
+    hosts: [domain-a.test]
+```
+
+You can fake the `Host` header with `-H`, so no real domain is needed:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/echo -H "Host: domain-a.test"
+```
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/echo -H "Host: domain-b.test"
+```
+
+| Setting | `domain-a.test` | `domain-b.test` |
+|---|---|---|
+| `hosts: [domain-a.test]` | 200 | 404 |
+| `hosts` removed | 200 | 200 |
+
+---
+
+## 10. One-line summary
+
+> **Route Hosts = "the request must come through this domain".** Match only, changes nothing, and only applies to requests that have already reached Kong.
