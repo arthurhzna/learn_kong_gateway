@@ -434,3 +434,126 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/echo -H "Host: do
 ## 10. One-line summary
 
 > **Route Hosts = "the request must come through this domain".** Match only, changes nothing, and only applies to requests that have already reached Kong.
+
+
+# Kong: Preserve Host
+
+> What the **Preserve Host** switch on a Kong Route does.
+> Domain and service names below are **placeholders**.
+
+| Placeholder | Meaning |
+|---|---|
+| `kong-proxy.apps.example.com` | Kong proxy domain the client calls |
+| `heartbeat-svc` | Kubernetes Service of the backend (Service Host) |
+| `heartbeat.apps.example.com` | OpenShift Route domain that goes straight to the backend |
+
+---
+
+## 1. One sentence
+
+> **Preserve Host decides what the backend sees in the `Host` header**: the Service's name (OFF) or the domain the client originally called (ON).
+
+Nothing else changes. The request still goes to the same backend, and every other header and the body are forwarded untouched.
+
+---
+
+## 2. OFF vs ON
+
+Client calls:
+
+```
+POST https://kong-proxy.apps.example.com/micro/hb-gateway/heartbeat/v2/insert
+Host: kong-proxy.apps.example.com
+X-API-KEY: …
+X-DEVICE: …
+{ body }
+```
+
+Service Host = `heartbeat-svc`
+
+```
+OFF (default)
+  Client  → Host: kong-proxy.apps.example.com
+  Kong    → replaces it
+  Backend ← Host: heartbeat-svc                    (Service Host)
+
+ON
+  Client  → Host: kong-proxy.apps.example.com
+  Kong    → keeps it
+  Backend ← Host: kong-proxy.apps.example.com      (original client domain)
+```
+
+| | OFF (default) | ON |
+|---|---|---|
+| `Host` header at the backend | `heartbeat-svc` | `kong-proxy.apps.example.com` |
+| Where the request is sent | `heartbeat-svc:80` | `heartbeat-svc:80` (**same**) |
+| `X-API-KEY`, `X-DEVICE`, … | untouched | untouched |
+| Body | untouched | untouched |
+
+---
+
+## 3. Envelope analogy
+
+```
+┌────────────────────────────────────────┐
+│ To: kong-proxy.apps.example.com        │  ← Host header (address on the envelope)
+│                                        │     OFF: Kong rewrites it to heartbeat-svc
+│ ┌────────────────────────────────────┐ │     ON : Kong leaves it as is
+│ │ X-API-KEY, X-DEVICE, X-Brand, …    │ │  ← other headers  ┐ the contents:
+│ │ { "sn": "...", "brand": "..." }    │ │  ← body           ┘ Kong never opens or changes them
+│ └────────────────────────────────────┘ │
+└────────────────────────────────────────┘
+```
+
+---
+
+## 4. What your handler sees (Go example)
+
+```go
+func (h *handler) Insert(w http.ResponseWriter, r *http.Request) {
+    fmt.Println(r.Host)                    // affected by Preserve Host
+    fmt.Println(r.Header.Get("X-API-KEY")) // NOT affected
+}
+```
+
+| Preserve Host | `r.Host` | `r.Header.Get("X-API-KEY")` |
+|---|---|---|
+| OFF | `heartbeat-svc` | value sent by the client |
+| ON | `kong-proxy.apps.example.com` | value sent by the client |
+
+If the handler never reads `r.Host` (and the router doesn't use `.Host(...)` matching), **ON and OFF make no difference**.
+
+---
+
+## 5. When to turn it ON
+
+Turn it on when the backend needs to know **which domain the client used**:
+
+1. **Logging / audit**: record the real domain instead of `heartbeat-svc`.
+2. **Absolute links and redirects**: the backend builds `https://<Host>/login`. With OFF that becomes `https://heartbeat-svc/login`, which nobody outside the cluster can open.
+3. **One backend, many domains** (virtual hosts / multi-tenant): the response depends on the domain.
+
+> Even with OFF, Kong adds `X-Forwarded-Host: kong-proxy.apps.example.com`, so the backend can still read the original domain from that header.
+
+---
+
+## 6. When it must stay OFF
+
+When the **Service Host is a domain that routes by `Host` header**, such as an OpenShift Route or a third-party API behind a load balancer/CDN:
+
+```
+Service Host: heartbeat.apps.example.com   (OpenShift Route domain, not an internal .svc name)
+
+ON  → OpenShift router receives Host: kong-proxy.apps.example.com
+    → no app registered for that host → 503 "Application is not available"  ❌
+
+OFF → OpenShift router receives Host: heartbeat.apps.example.com → correct app  ✅
+```
+
+| Service Host type | Preserve Host ON safe? |
+|---|---|
+| Internal Kubernetes Service (`heartbeat-svc`, `*.svc.cluster.local`) | ✅ Yes |
+| OpenShift Route / ingress domain | ❌ Usually breaks (503) |
+| External API (vendor, CDN, cloud LB) | ❌ Usually breaks (404/403/TLS error) |
+
+---
